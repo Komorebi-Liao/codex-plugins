@@ -34,7 +34,7 @@ class HookTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.data = self.root / "data"
-        self.env = {"PLUGIN_DATA": str(self.data)}
+        self.env = {"PLUGIN_DATA": str(self.data), "SESSION_GUARDIAN_LANGUAGE": "en"}
         self.transcript = self.root / "session.jsonl"
         config = dict(guardian.DEFAULT_CONFIG, notifications=False)
         guardian.write_json_atomic(self.data / "config.json", config)
@@ -60,7 +60,7 @@ class HookTests(unittest.TestCase):
         guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
         result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env)
         self.assertTrue(result["continue"])
-        self.assertIn("继续交接", result["systemMessage"])
+        self.assertIn("continue rollover", result["systemMessage"])
         state = guardian.load_state(self.data, "session-test")
         self.assertEqual(guardian.ROLLOVER_REQUIRED, state["status"])
         self.assertEqual("size", state["trigger"])
@@ -71,8 +71,39 @@ class HookTests(unittest.TestCase):
         self.assertEqual("block", result["decision"])
         self.assertEqual(result["systemMessage"], result["reason"])
         self.assertIn("intercepted this prompt", result["systemMessage"])
-        self.assertIn("继续交接", result["reason"])
+        self.assertIn("continue rollover", result["reason"])
         self.assertEqual(guardian.ROLLOVER_REQUIRED, guardian.load_state(self.data, "session-test")["status"])
+
+    def test_chinese_setting_uses_fully_localized_block_message(self):
+        config = dict(guardian.DEFAULT_CONFIG, notifications=False, language="zh-CN")
+        guardian.write_json_atomic(self.data / "config.json", config)
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        request = payload("UserPromptSubmit", self.transcript)
+        result = guardian.handle_hook(request, env=self.env)
+        self.assertEqual("block", result["decision"])
+        self.assertIn("已拦截此提示", result["systemMessage"])
+        self.assertIn("该提示没有执行", result["systemMessage"])
+        self.assertIn("继续交接", result["reason"])
+        self.assertNotIn("intercepted this prompt", result["systemMessage"])
+
+    def test_stop_notice_uses_configured_chinese(self):
+        config = dict(guardian.DEFAULT_CONFIG, notifications=False, language="zh-CN")
+        guardian.write_json_atomic(self.data / "config.json", config)
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"])
+        request = payload("UserPromptSubmit", self.transcript)
+        for _ in range(guardian.DEFAULT_CONFIG["min_prompts"]):
+            guardian.handle_hook(request, env=self.env)
+        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env)
+        self.assertIn("当前任务需要会话交接", result["systemMessage"])
+        self.assertNotIn("rollover is required", result["systemMessage"])
+
+    def test_explicit_language_setting_overrides_system_language(self):
+        config = dict(guardian.DEFAULT_CONFIG, notifications=False, language="en")
+        guardian.write_json_atomic(self.data / "config.json", config)
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        chinese_env = dict(self.env, SESSION_GUARDIAN_LANGUAGE="zh-CN")
+        result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=chinese_env)
+        self.assertIn("intercepted this prompt", result["systemMessage"])
 
     def test_explicit_confirmation_starts_single_agent_rollover_request(self):
         make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
@@ -160,6 +191,23 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(64 * guardian.MIB, guardian.DEFAULT_CONFIG["warning_bytes"])
         self.assertEqual(96 * guardian.MIB, guardian.DEFAULT_CONFIG["rollover_bytes"])
         self.assertEqual(128 * guardian.MIB, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+
+    def test_language_resolution_uses_local_system_language(self):
+        self.assertEqual("zh-CN", guardian.resolve_language({"language": "zh-CN"}))
+        self.assertEqual(
+            "zh-CN",
+            guardian.resolve_language({"language": "auto"}, locale_value="zh_CN"),
+        )
+        self.assertEqual(
+            "en",
+            guardian.resolve_language({"language": "auto"}, locale_value="ja_JP"),
+        )
+        self.assertEqual("en", guardian.resolve_language({"language": "auto"}, locale_value="en_US"))
+
+    def test_invalid_language_is_rejected(self):
+        config = dict(guardian.DEFAULT_CONFIG, language="unsupported")
+        with self.assertRaises(ValueError):
+            guardian.validate_config(config)
 
 
 class RepositoryPrivacyTests(unittest.TestCase):

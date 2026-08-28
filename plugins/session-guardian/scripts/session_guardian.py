@@ -6,6 +6,7 @@ from __future__ import print_function
 import argparse
 import hashlib
 import json
+import locale
 import os
 import platform
 import shutil
@@ -20,6 +21,7 @@ MIB = 1024 * 1024
 STATE_VERSION = 1
 DEFAULT_CONFIG = {
     "mode": "auto",
+    "language": "auto",
     "warning_bytes": 64 * MIB,
     "rollover_bytes": 96 * MIB,
     "hard_limit_bytes": 128 * MIB,
@@ -27,6 +29,7 @@ DEFAULT_CONFIG = {
     "archive_original": True,
     "notifications": True,
 }
+SUPPORTED_LANGUAGES = ("auto", "en", "zh-CN")
 ROLLOVER_REQUIRED = "rollover_required"
 ROLLOVER_ACTIVE = "agent_rollover"
 ROLLOVER_CONFIRMATIONS = {
@@ -45,6 +48,71 @@ context already available in this turn; do not make a separate summary request. 
 replacement task is ready before archiving this current task. If any required task tool is missing or
 fails, leave this task unarchived and explain the concrete error to the user.
 """
+
+MESSAGES = {
+    "en": {
+        "rollover_confirmed": (
+            "Session Guardian: rollover confirmed. The control prompt will prepare a compact "
+            "replacement task; no business request will be executed here."
+        ),
+        "pending_confirmation": (
+            "Session Guardian is waiting for explicit rollover confirmation. This prompt was blocked "
+            "and was not executed. Send exactly “continue rollover” to proceed."
+        ),
+        "hard_limit_blocked": (
+            "Session Guardian intercepted this prompt because the task reached the {limit} hard safety "
+            "limit. The prompt was not executed. Send exactly “continue rollover” to authorize one "
+            "final full-context handoff request."
+        ),
+        "hard_limit_notification": "Oversized task intercepted; confirm rollover in Codex to continue.",
+        "warning_auto": "Automatic rollover will run after a completed turn at {threshold}.",
+        "warning_only": "Warning-only mode is enabled; no task will be archived automatically.",
+        "warning": "Session Guardian: this task is {size}. {action}",
+        "warning_threshold": (
+            "Session Guardian: rollover threshold reached at {size}; warning-only mode left this task "
+            "unchanged."
+        ),
+        "rollover_notification": "Task rollover is required; confirm rollover in Codex to continue.",
+        "rollover_required": (
+            "Session Guardian: rollover is required. Send “continue rollover” to authorize the compact "
+            "handoff."
+        ),
+        "manual_rollover_required": (
+            "Session Guardian: manual rollover is required. Send “continue rollover” to authorize the "
+            "compact handoff."
+        ),
+        "inspection_failed": "Session Guardian could not inspect this task; no rollover action was taken.",
+    },
+    "zh-CN": {
+        "rollover_confirmed": (
+            "Session Guardian：已确认会话交接。这条控制提示将用于准备精简的替代任务；"
+            "不会在当前任务中执行业务请求。"
+        ),
+        "pending_confirmation": (
+            "Session Guardian 正在等待明确的会话交接确认。此提示已被拦截，并未执行。"
+            "请准确发送“继续交接”以继续。"
+        ),
+        "hard_limit_blocked": (
+            "Session Guardian 已拦截此提示，因为当前任务已达到 {limit} 的硬保护阈值。"
+            "该提示没有执行。请准确发送“继续交接”，以授权最后一次携带完整上下文的交接请求。"
+        ),
+        "hard_limit_notification": "已拦截超大任务；请在 Codex 中确认会话交接。",
+        "warning_auto": "当任务在完整回合后达到 {threshold} 时，将请求会话交接。",
+        "warning_only": "已启用仅提醒模式；不会自动归档任务。",
+        "warning": "Session Guardian：当前任务大小为 {size}。{action}",
+        "warning_threshold": (
+            "Session Guardian：当前任务已在 {size} 达到交接阈值；仅提醒模式保持任务不变。"
+        ),
+        "rollover_notification": "当前任务需要会话交接；请在 Codex 中确认。",
+        "rollover_required": (
+            "Session Guardian：当前任务需要会话交接。请发送“继续交接”，以授权生成精简交接任务。"
+        ),
+        "manual_rollover_required": (
+            "Session Guardian：已请求手动会话交接。请发送“继续交接”，以授权生成精简交接任务。"
+        ),
+        "inspection_failed": "Session Guardian 无法检查当前任务；未执行会话交接操作。",
+    },
+}
 
 
 def utc_now():
@@ -111,6 +179,8 @@ def load_config(data_dir):
 def validate_config(config):
     if config.get("mode") not in ("auto", "warn", "off"):
         raise ValueError("mode must be auto, warn, or off")
+    if config.get("language") not in SUPPORTED_LANGUAGES:
+        raise ValueError("language must be auto, en, or zh-CN")
     for key in (
         "warning_bytes",
         "rollover_bytes",
@@ -165,6 +235,68 @@ def transcript_size(path_value):
 
 def format_mib(byte_count):
     return "%.1f MiB" % (float(byte_count) / MIB)
+
+
+def normalize_language(value):
+    normalized = str(value or "").strip().replace("_", "-").lower()
+    if not normalized or normalized == "auto":
+        return None
+    if normalized.startswith("zh"):
+        return "zh-CN"
+    if normalized.startswith("en") or normalized in ("c", "posix"):
+        return "en"
+    return None
+
+
+def language_from_locale(value):
+    normalized = str(value or "").strip().replace("_", "-").lower()
+    if not normalized:
+        return None
+    return "zh-CN" if normalized.startswith("zh") else "en"
+
+
+def system_language(env=None, locale_value=None):
+    env = env or os.environ
+    if locale_value is not None:
+        return language_from_locale(locale_value) or "en"
+    if platform.system() == "Darwin" and shutil.which("defaults"):
+        try:
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleLocale"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return language_from_locale(result.stdout) or "en"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for key in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        if env.get(key):
+            return language_from_locale(env[key]) or "en"
+    try:
+        current_locale = locale.getlocale()[0]
+    except (ValueError, TypeError):
+        current_locale = None
+    return language_from_locale(current_locale) or "en"
+
+
+def resolve_language(config, payload=None, state=None, env=None, locale_value=None):
+    env = env or os.environ
+    configured = config.get("language", "auto")
+    if configured != "auto":
+        return normalize_language(configured) or "en"
+    explicit = normalize_language(env.get("SESSION_GUARDIAN_LANGUAGE"))
+    if explicit:
+        return explicit
+    return system_language(env=env, locale_value=locale_value)
+
+
+def localized(language, key, **values):
+    catalog = MESSAGES.get(language, MESSAGES["en"])
+    return catalog[key].format(**values)
 
 
 def warning_output(message, event_name):
@@ -272,6 +404,7 @@ def handle_hook(payload, env=None):
 
     size = transcript_size(payload.get("transcript_path"))
     state = load_state(data_dir, session_id)
+    language = resolve_language(config, payload=payload, state=state, env=env)
     manual_rollover_pending = (
         state.get("status") in (ROLLOVER_REQUIRED, ROLLOVER_ACTIVE)
         and state.get("trigger") == "manual"
@@ -285,7 +418,12 @@ def handle_hook(payload, env=None):
 
     if event_name == "UserPromptSubmit":
         prompt_count = int(state.get("prompt_count", 0)) + 1
-        fields = {"prompt_count": prompt_count, "transcript_bytes": size, "status": state.get("status", "monitoring")}
+        fields = {
+            "prompt_count": prompt_count,
+            "transcript_bytes": size,
+            "status": state.get("status", "monitoring"),
+            "language": language,
+        }
         should_warn = size >= config["warning_bytes"] and not state.get("warned")
         if should_warn:
             fields.update({"warned": True, "warning_at": utc_now()})
@@ -301,13 +439,11 @@ def handle_hook(payload, env=None):
                     last_error_message=None,
                 )
                 return rollover_output(
-                    "Session Guardian: rollover confirmed. The control prompt will prepare a compact "
-                    "replacement task; no business request will be executed here.",
+                    localized(language, "rollover_confirmed"),
                     archive_original=config["archive_original"],
                 )
             return block_output(
-                "Session Guardian is waiting for explicit rollover confirmation. This prompt was blocked and "
-                "was not executed. Send exactly “继续交接” (or “continue rollover”) to proceed.",
+                localized(language, "pending_confirmation"),
             )
         if size >= config["hard_limit_bytes"] and config["mode"] == "auto":
             update_state(
@@ -320,21 +456,24 @@ def handle_hook(payload, env=None):
                 last_error_message=None,
             )
             if config["notifications"]:
-                notify_desktop("Oversized task intercepted; confirm rollover in Codex to continue.")
+                notify_desktop(localized(language, "hard_limit_notification"))
             return block_output(
-                "Session Guardian intercepted this prompt because the task reached the %s hard safety limit. "
-                "The prompt was not executed. Send exactly “继续交接” (or “continue rollover”) to "
-                "authorize one final full-context handoff request."
-                % format_mib(config["hard_limit_bytes"]),
+                localized(
+                    language,
+                    "hard_limit_blocked",
+                    limit=format_mib(config["hard_limit_bytes"]),
+                ),
             )
         if should_warn:
-            action = "Automatic rollover will run after a completed turn at %s." % format_mib(
-                config["rollover_bytes"]
+            action = localized(
+                language,
+                "warning_auto",
+                threshold=format_mib(config["rollover_bytes"]),
             )
             if config["mode"] == "warn":
-                action = "Warning-only mode is enabled; no task will be archived automatically."
+                action = localized(language, "warning_only")
             return warning_output(
-                "Session Guardian: this task is %s. %s" % (format_mib(size), action), event_name
+                localized(language, "warning", size=format_mib(size), action=action), event_name
             )
         return None
 
@@ -357,8 +496,7 @@ def handle_hook(payload, env=None):
     if config["mode"] == "warn" and not forced:
         update_state(data_dir, session_id, status="warning", transcript_bytes=size)
         return warning_output(
-            "Session Guardian: rollover threshold reached at %s; warning-only mode left this task unchanged."
-            % format_mib(size),
+            localized(language, "warning_threshold", size=format_mib(size)),
             event_name,
         )
 
@@ -373,11 +511,9 @@ def handle_hook(payload, env=None):
         last_error_message=None,
     )
     if config["notifications"]:
-        notify_desktop("Task rollover is required; confirm rollover in Codex to continue.")
+        notify_desktop(localized(language, "rollover_notification"))
     return warning_output(
-        "Session Guardian: %srollover is required. Send “继续交接” (or “continue rollover”) "
-        "to authorize the compact handoff."
-        % ("manual " if forced else ""),
+        localized(language, "manual_rollover_required" if forced else "rollover_required"),
         event_name,
     )
 
@@ -395,6 +531,8 @@ def configure(args, data_dir):
     config = load_config(data_dir)
     if args.mode is not None:
         config["mode"] = args.mode
+    if args.language is not None:
+        config["language"] = args.language
     if args.warning_mib is not None:
         config["warning_bytes"] = int(args.warning_mib * MIB)
     if args.rollover_mib is not None:
@@ -447,6 +585,7 @@ def build_parser():
     disarm.add_argument("--cwd", default=os.getcwd())
     config_parser = subparsers.add_parser("configure", help="Update persistent local settings")
     config_parser.add_argument("--mode", choices=("auto", "warn", "off"))
+    config_parser.add_argument("--language", choices=SUPPORTED_LANGUAGES)
     config_parser.add_argument("--warning-mib", type=float)
     config_parser.add_argument("--rollover-mib", type=float)
     config_parser.add_argument("--hard-limit-mib", type=float)
@@ -460,6 +599,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     data_dir = private_data_dir()
     if args.command == "hook":
+        payload = {}
         try:
             payload = json.load(sys.stdin)
             result = handle_hook(payload)
@@ -467,12 +607,14 @@ def main(argv=None):
                 json.dump(result, sys.stdout, ensure_ascii=False)
                 sys.stdout.write("\n")
         except Exception:
+            language = resolve_language(DEFAULT_CONFIG, payload=payload, env=os.environ)
             json.dump(
                 {
                     "continue": True,
-                    "systemMessage": "Session Guardian could not inspect this task; no rollover action was taken.",
+                    "systemMessage": localized(language, "inspection_failed"),
                 },
                 sys.stdout,
+                ensure_ascii=False,
             )
             sys.stdout.write("\n")
         return 0

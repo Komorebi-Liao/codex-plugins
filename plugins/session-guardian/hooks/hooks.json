@@ -9,7 +9,7 @@
             "command": "python3 \"$PLUGIN_ROOT/scripts/session_guardian.py\" hook",
             "commandWindows": "py -3 \"%PLUGIN_ROOT%\\scripts\\session_guardian.py\" hook",
             "timeout": 5,
-            "statusMessage": "Checking task size"
+            "statusMessage": "Session Guardian"
           }
         ]
       }
@@ -22,7 +22,7 @@
             "command": "python3 \"$PLUGIN_ROOT/scripts/session_guardian.py\" hook",
             "commandWindows": "py -3 \"%PLUGIN_ROOT%\\scripts\\session_guardian.py\" hook",
             "timeout": 10,
-            "statusMessage": "Checking rollover threshold"
+            "statusMessage": "Session Guardian"
           }
         ]
       }
