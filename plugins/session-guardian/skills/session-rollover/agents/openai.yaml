@@ -1,0 +1,4 @@
+interface:
+  display_name: "Session Rollover"
+  short_description: "Inspect or roll over oversized Codex tasks"
+  default_prompt: "Check this task's size and roll it over safely if needed."

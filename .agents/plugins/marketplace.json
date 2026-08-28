@@ -1,0 +1,21 @@
+{
+  "name": "komorebi-codex-plugins",
+  "interface": {
+    "displayName": "Komorebi Codex Plugins"
+  },
+  "plugins": [
+    {
+      "name": "session-guardian",
+      "source": {
+        "source": "local",
+        "path": "./plugins/session-guardian"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+        "products": ["codex"]
+      },
+      "category": "Productivity"
+    }
+  ]
+}

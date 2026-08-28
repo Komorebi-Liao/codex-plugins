@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Runtime state belongs in the installed plugin's private data directory.
+.session-guardian/
+plugin-data/

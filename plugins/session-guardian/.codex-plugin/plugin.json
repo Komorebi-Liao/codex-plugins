@@ -1,0 +1,29 @@
+{
+  "name": "session-guardian",
+  "version": "1.0.0",
+  "description": "Detect oversized Codex tasks and safely continue them in a compact replacement task.",
+  "author": {
+    "name": "Komorebi-Liao",
+    "url": "https://github.com/Komorebi-Liao"
+  },
+  "homepage": "https://github.com/Komorebi-Liao/codex-plugins",
+  "repository": "https://github.com/Komorebi-Liao/codex-plugins",
+  "license": "Apache-2.0",
+  "keywords": ["codex", "session", "context", "rollover", "automation"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Session Guardian",
+    "shortDescription": "Roll oversized tasks into compact handoffs.",
+    "longDescription": "Monitors Codex task size locally, warns before requests become expensive, and safely creates a summarized replacement task before archiving the original.",
+    "developerName": "Komorebi-Liao",
+    "category": "Productivity",
+    "capabilities": ["Lifecycle hooks", "Local automation"],
+    "websiteURL": "https://github.com/Komorebi-Liao/codex-plugins",
+    "privacyPolicyURL": "https://github.com/Komorebi-Liao/codex-plugins/blob/main/PRIVACY.md",
+    "defaultPrompt": [
+      "Check whether this task is getting too large.",
+      "Roll this task over now and preserve the handoff.",
+      "Show my Session Guardian configuration."
+    ]
+  }
+}
