@@ -24,8 +24,9 @@ MIB = 1024 * 1024
 STATE_VERSION = 1
 DEFAULT_CONFIG = {
     "mode": "auto",
-    "warning_bytes": 8 * MIB,
-    "rollover_bytes": 16 * MIB,
+    "warning_bytes": 64 * MIB,
+    "rollover_bytes": 96 * MIB,
+    "hard_limit_bytes": 128 * MIB,
     "min_prompts": 6,
     "archive_original": True,
     "notifications": True,
@@ -154,11 +155,18 @@ def load_config(data_dir):
 def validate_config(config):
     if config.get("mode") not in ("auto", "warn", "off"):
         raise ValueError("mode must be auto, warn, or off")
-    for key in ("warning_bytes", "rollover_bytes", "min_prompts"):
+    for key in (
+        "warning_bytes",
+        "rollover_bytes",
+        "hard_limit_bytes",
+        "min_prompts",
+    ):
         if not isinstance(config.get(key), int) or config[key] < 1:
             raise ValueError("%s must be a positive integer" % key)
     if config["warning_bytes"] >= config["rollover_bytes"]:
         raise ValueError("warning threshold must be smaller than rollover threshold")
+    if config["rollover_bytes"] >= config["hard_limit_bytes"]:
+        raise ValueError("rollover threshold must be smaller than hard limit")
     for key in ("archive_original", "notifications"):
         if not isinstance(config.get(key), bool):
             raise ValueError("%s must be boolean" % key)
@@ -214,6 +222,18 @@ def warning_output(message, event_name):
             ),
         }
     return result
+
+
+def block_output(message):
+    return {
+        "continue": False,
+        "stopReason": message,
+        "systemMessage": message,
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": message,
+        },
+    }
 
 
 def arm_path(data_dir):
@@ -278,7 +298,7 @@ def detached_spawn(command):
     return subprocess.Popen(command, **options)
 
 
-def schedule_rollover(payload, data_dir, config, byte_count, lock, spawn_func=detached_spawn):
+def schedule_rollover(payload, data_dir, config, byte_count, lock, spawn_func=detached_spawn, trigger="size"):
     session_id = payload["session_id"]
     job_dir = Path(data_dir) / "jobs"
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -289,6 +309,7 @@ def schedule_rollover(payload, data_dir, config, byte_count, lock, spawn_func=de
         "cwd": payload.get("cwd") or os.getcwd(),
         "model": payload.get("model"),
         "transcript_bytes": byte_count,
+        "trigger": trigger,
         "lock_path": str(lock),
         "created_at": utc_now(),
         "config": config,
@@ -299,6 +320,7 @@ def schedule_rollover(payload, data_dir, config, byte_count, lock, spawn_func=de
         session_id,
         status="scheduled",
         transcript_bytes=byte_count,
+        trigger=trigger,
         scheduled_at=utc_now(),
         last_error=None,
     )
@@ -335,6 +357,37 @@ def handle_hook(payload, env=None, spawn_func=detached_spawn):
         if should_warn:
             fields.update({"warned": True, "warning_at": utc_now()})
         update_state(data_dir, session_id, **fields)
+        if size >= config["hard_limit_bytes"] and config["mode"] == "auto":
+            summary_prompt_allowed = (
+                state.get("status") == "summarizing"
+                and state.get("summary_prompt_pending") is True
+                and ("prompt" not in payload or payload.get("prompt") == SUMMARY_PROMPT)
+            )
+            if summary_prompt_allowed:
+                update_state(data_dir, session_id, summary_prompt_pending=False)
+            else:
+                if state.get("status") not in ACTIVE_STATES:
+                    lock = acquire_rollover_lock(data_dir, session_id)
+                    if lock:
+                        try:
+                            schedule_rollover(
+                                payload,
+                                data_dir,
+                                config,
+                                size,
+                                lock,
+                                spawn_func=spawn_func,
+                                trigger="hard_limit",
+                            )
+                        except Exception:
+                            return block_output(
+                                "Session Guardian blocked this prompt at %s, but could not start the replacement worker. "
+                                "The original task remains available." % format_mib(size)
+                            )
+                return block_output(
+                    "Session Guardian blocked this prompt because the task reached the %s hard safety limit. "
+                    "A summarized replacement task is being prepared." % format_mib(config["hard_limit_bytes"])
+                )
         if should_warn:
             action = "Automatic rollover will run after a completed turn at %s." % format_mib(
                 config["rollover_bytes"]
@@ -357,8 +410,9 @@ def handle_hook(payload, env=None, spawn_func=detached_spawn):
     prompt_count = int(state.get("prompt_count", 0))
     threshold_reached = size >= config["rollover_bytes"]
     enough_prompts = prompt_count >= config["min_prompts"]
-    extreme_size = size >= 2 * config["rollover_bytes"]
-    if not forced and not (threshold_reached and (enough_prompts or extreme_size)):
+    hard_limit_reached = size >= config["hard_limit_bytes"]
+    size_rollover = threshold_reached and (enough_prompts or hard_limit_reached)
+    if not forced and not size_rollover:
         return None
 
     last_attempt = int(state.get("last_attempt_at") or 0)
@@ -375,8 +429,9 @@ def handle_hook(payload, env=None, spawn_func=detached_spawn):
     lock = acquire_rollover_lock(data_dir, session_id)
     if not lock:
         return None
+    trigger = "manual" if forced else "size"
     try:
-        schedule_rollover(payload, data_dir, config, size, lock, spawn_func=spawn_func)
+        schedule_rollover(payload, data_dir, config, size, lock, spawn_func=spawn_func, trigger=trigger)
     except Exception:
         return warning_output(
             "Session Guardian could not start the rollover worker; the current task was left unchanged.",
@@ -673,7 +728,7 @@ def run_rollover(job, data_dir):
                 "clientInfo": {
                     "name": "session_guardian",
                     "title": "Session Guardian",
-                    "version": "1.0.0",
+                    "version": "1.1.0",
                 }
             },
         )
@@ -685,7 +740,13 @@ def run_rollover(job, data_dir):
         original_title = original.get("name")
         goal_result = client.request("thread/goal/get", {"threadId": session_id})
 
-        update_state(data_dir, session_id, status="summarizing", last_attempt_at=utc_now())
+        update_state(
+            data_dir,
+            session_id,
+            status="summarizing",
+            summary_prompt_pending=True,
+            last_attempt_at=utc_now(),
+        )
         client.request("thread/resume", {"threadId": session_id})
         summary_turn = client.request(
             "turn/start",
@@ -698,7 +759,7 @@ def run_rollover(job, data_dir):
         summary_text = client.wait_for_turn(session_id, response_turn_id(summary_turn))
         summary = parse_summary(summary_text)
 
-        update_state(data_dir, session_id, status="creating")
+        update_state(data_dir, session_id, status="creating", summary_prompt_pending=False)
         thread_params = {
             "cwd": job.get("cwd"),
             "developerInstructions": CONTINUATION_INSTRUCTIONS,
@@ -818,6 +879,8 @@ def configure(args, data_dir):
         config["warning_bytes"] = int(args.warning_mib * MIB)
     if args.rollover_mib is not None:
         config["rollover_bytes"] = int(args.rollover_mib * MIB)
+    if args.hard_limit_mib is not None:
+        config["hard_limit_bytes"] = int(args.hard_limit_mib * MIB)
     if args.min_prompts is not None:
         config["min_prompts"] = args.min_prompts
     if args.archive_original is not None:
@@ -865,6 +928,7 @@ def build_parser():
     config_parser.add_argument("--mode", choices=("auto", "warn", "off"))
     config_parser.add_argument("--warning-mib", type=float)
     config_parser.add_argument("--rollover-mib", type=float)
+    config_parser.add_argument("--hard-limit-mib", type=float)
     config_parser.add_argument("--min-prompts", type=int)
     config_parser.add_argument("--archive-original", type=yes_no)
     config_parser.add_argument("--notifications", type=yes_no)

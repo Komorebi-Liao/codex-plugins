@@ -46,7 +46,7 @@ class HookTests(unittest.TestCase):
     def test_warning_uses_size_without_reading_contents(self):
         make_transcript(self.transcript, guardian.DEFAULT_CONFIG["warning_bytes"])
         result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
-        self.assertIn("8.0 MiB", result["systemMessage"])
+        self.assertIn(guardian.format_mib(guardian.DEFAULT_CONFIG["warning_bytes"]), result["systemMessage"])
         self.assertEqual("UserPromptSubmit", result["hookSpecificOutput"]["hookEventName"])
         state = guardian.load_state(self.data, "session-test")
         self.assertEqual(1, state["prompt_count"])
@@ -129,6 +129,55 @@ class HookTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertFalse(spawned)
 
+    def test_hard_limit_blocks_prompt_and_starts_rollover(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        spawned = []
+        result = guardian.handle_hook(
+            payload("UserPromptSubmit", self.transcript),
+            env=self.env,
+            spawn_func=lambda command: spawned.append(command),
+        )
+        self.assertFalse(result["continue"])
+        self.assertIn("hard safety limit", result["systemMessage"])
+        self.assertEqual(1, len(spawned))
+        state = guardian.load_state(self.data, "session-test")
+        self.assertEqual("scheduled", state["status"])
+        self.assertEqual("hard_limit", state["trigger"])
+
+    def test_hard_limit_allows_exactly_one_guardian_summary_turn(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        guardian.update_state(
+            self.data,
+            "session-test",
+            status="summarizing",
+            prompt_count=10,
+            warned=True,
+            summary_prompt_pending=True,
+        )
+        summary_payload = payload("UserPromptSubmit", self.transcript)
+        summary_payload["prompt"] = guardian.SUMMARY_PROMPT
+        result = guardian.handle_hook(summary_payload, env=self.env)
+        self.assertIsNone(result)
+        self.assertFalse(guardian.load_state(self.data, "session-test")["summary_prompt_pending"])
+
+        result = guardian.handle_hook(summary_payload, env=self.env)
+        self.assertFalse(result["continue"])
+
+    def test_hard_limit_blocks_user_prompt_during_summary(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        guardian.update_state(
+            self.data,
+            "session-test",
+            status="summarizing",
+            prompt_count=10,
+            warned=True,
+            summary_prompt_pending=True,
+        )
+        user_payload = payload("UserPromptSubmit", self.transcript)
+        user_payload["prompt"] = "Continue my work"
+        result = guardian.handle_hook(user_payload, env=self.env)
+        self.assertFalse(result["continue"])
+        self.assertTrue(guardian.load_state(self.data, "session-test")["summary_prompt_pending"])
 
 class SummaryTests(unittest.TestCase):
     def summary(self):
@@ -163,6 +212,11 @@ class SummaryTests(unittest.TestCase):
         config["warning_bytes"] = config["rollover_bytes"]
         with self.assertRaises(ValueError):
             guardian.validate_config(config)
+
+    def test_default_thresholds_match_measured_safety_policy(self):
+        self.assertEqual(64 * guardian.MIB, guardian.DEFAULT_CONFIG["warning_bytes"])
+        self.assertEqual(96 * guardian.MIB, guardian.DEFAULT_CONFIG["rollover_bytes"])
+        self.assertEqual(128 * guardian.MIB, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
 
 
 class FakeClient:

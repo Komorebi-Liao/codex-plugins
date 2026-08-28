@@ -6,4 +6,6 @@ It reads only the lifecycle fields supplied by Codex hooks, including the curren
 
 Session Guardian does not operate an external server, add analytics, transmit telemetry, or require a separate API key. The normal Codex model request used to create the summary remains subject to the user's OpenAI account, workspace settings, and OpenAI data controls.
 
+Session Guardian does not inspect Clash/Mihomo connections, proxy traffic, packets, or operating-system network counters.
+
 Local state contains configuration, task identifiers, byte counts, timestamps, and rollover status. It does not store the generated handoff summary. State can be removed by uninstalling the plugin and deleting its plugin data directory.
