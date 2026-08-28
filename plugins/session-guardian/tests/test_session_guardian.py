@@ -1,12 +1,8 @@
 import importlib.util
-import json
-import os
-import tempfile
-import types
-import unittest
 import re
+import tempfile
+import unittest
 from pathlib import Path
-from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "session_guardian.py"
@@ -29,6 +25,7 @@ def payload(event, transcript, session="session-test", cwd=None):
         "cwd": cwd or str(transcript.parent),
         "hook_event_name": event,
         "model": "test-model",
+        "prompt": "Continue the original work",
     }
 
 
@@ -39,6 +36,8 @@ class HookTests(unittest.TestCase):
         self.data = self.root / "data"
         self.env = {"PLUGIN_DATA": str(self.data)}
         self.transcript = self.root / "session.jsonl"
+        config = dict(guardian.DEFAULT_CONFIG, notifications=False)
+        guardian.write_json_atomic(self.data / "config.json", config)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -52,161 +51,105 @@ class HookTests(unittest.TestCase):
         self.assertEqual(1, state["prompt_count"])
         self.assertTrue(state["warned"])
 
-    def test_automatic_rollover_requires_size_and_prompt_count(self):
+    def test_rollover_notice_requires_size_and_prompt_count(self):
         make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"])
-        spawned = []
-
-        def capture(command):
-            spawned.append(command)
-            return types.SimpleNamespace(pid=123)
-
         for _ in range(guardian.DEFAULT_CONFIG["min_prompts"] - 1):
             guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
-        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env, spawn_func=capture)
-        self.assertIsNone(result)
-        self.assertFalse(spawned)
+        self.assertIsNone(guardian.handle_hook(payload("Stop", self.transcript), env=self.env))
 
         guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
-        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env, spawn_func=capture)
-        self.assertIn("rollover started", result["systemMessage"])
-        self.assertEqual(1, len(spawned))
-        self.assertEqual("worker", spawned[0][2])
-        self.assertEqual("scheduled", guardian.load_state(self.data, "session-test")["status"])
+        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env)
+        self.assertTrue(result["continue"])
+        self.assertIn("继续交接", result["systemMessage"])
+        state = guardian.load_state(self.data, "session-test")
+        self.assertEqual(guardian.ROLLOVER_REQUIRED, state["status"])
+        self.assertEqual("size", state["trigger"])
 
-    def test_warning_mode_never_spawns(self):
-        config = dict(guardian.DEFAULT_CONFIG)
-        config["mode"] = "warn"
+    def test_hard_limit_blocks_request_with_visible_confirmation_message(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
+        self.assertEqual("block", result["decision"])
+        self.assertEqual(result["systemMessage"], result["reason"])
+        self.assertIn("intercepted this prompt", result["systemMessage"])
+        self.assertIn("继续交接", result["reason"])
+        self.assertEqual(guardian.ROLLOVER_REQUIRED, guardian.load_state(self.data, "session-test")["status"])
+
+    def test_explicit_confirmation_starts_single_agent_rollover_request(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED, prompt_count=10)
+        confirmation = payload("UserPromptSubmit", self.transcript)
+        confirmation["prompt"] = "  继续交接  "
+        result = guardian.handle_hook(confirmation, env=self.env)
+        self.assertTrue(result["continue"])
+        self.assertNotIn("decision", result)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("before any tool call", context)
+        self.assertIn("explicitly confirmed rollover", context)
+        self.assertIn("do not make a separate summary request", context)
+        self.assertIn("replacement task is ready before archiving", context.replace("\n", " "))
+        self.assertEqual(guardian.ROLLOVER_ACTIVE, guardian.load_state(self.data, "session-test")["status"])
+
+    def test_pending_rollover_blocks_non_confirmation_prompt_again(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"])
+        guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED, prompt_count=10)
+        result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
+        self.assertEqual("block", result["decision"])
+        self.assertIn("waiting for explicit", result["reason"])
+
+    def test_stop_after_rollover_instruction_does_not_recurse(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_ACTIVE, prompt_count=10)
+        self.assertIsNone(guardian.handle_hook(payload("Stop", self.transcript), env=self.env))
+
+    def test_archive_disabled_is_carried_into_agent_instruction(self):
+        config = dict(guardian.DEFAULT_CONFIG, notifications=False, archive_original=False)
         guardian.write_json_atomic(self.data / "config.json", config)
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"] * 2)
-        spawned = []
-        result = guardian.handle_hook(
-            payload("Stop", self.transcript), env=self.env, spawn_func=lambda command: spawned.append(command)
-        )
-        self.assertIn("warning-only", result["systemMessage"])
-        self.assertFalse(spawned)
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED, prompt_count=10)
+        confirmation = payload("UserPromptSubmit", self.transcript)
+        confirmation["prompt"] = "continue rollover"
+        result = guardian.handle_hook(confirmation, env=self.env)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Leave this current task unarchived", context)
 
-    def test_manual_arm_bypasses_thresholds_once(self):
+    def test_warning_mode_never_requests_rollover(self):
+        config = dict(guardian.DEFAULT_CONFIG, mode="warn", notifications=False)
+        guardian.write_json_atomic(self.data / "config.json", config)
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env)
+        self.assertTrue(result["continue"])
+        self.assertIn("warning-only", result["systemMessage"])
+        self.assertNotEqual(guardian.ROLLOVER_REQUIRED, guardian.load_state(self.data, "session-test")["status"])
+
+    def test_manual_arm_requests_rollover_once(self):
         make_transcript(self.transcript, 10)
         guardian.write_json_atomic(
             guardian.arm_path(self.data),
             {"cwd": guardian.canonical_path(str(self.root)), "armed_at": guardian.utc_now()},
         )
-        spawned = []
-        result = guardian.handle_hook(
-            payload("Stop", self.transcript, cwd=str(self.root)),
-            env=self.env,
-            spawn_func=lambda command: spawned.append(command),
-        )
+        result = guardian.handle_hook(payload("Stop", self.transcript, cwd=str(self.root)), env=self.env)
+        self.assertTrue(result["continue"])
         self.assertIn("manual rollover", result["systemMessage"])
-        self.assertEqual(1, len(spawned))
         self.assertFalse(guardian.arm_path(self.data).exists())
 
-    def test_manual_arm_works_when_automatic_monitoring_is_off(self):
-        config = dict(guardian.DEFAULT_CONFIG)
-        config["mode"] = "off"
+    def test_manual_arm_works_when_monitoring_is_off(self):
+        config = dict(guardian.DEFAULT_CONFIG, mode="off", notifications=False)
         guardian.write_json_atomic(self.data / "config.json", config)
         make_transcript(self.transcript, 10)
         guardian.write_json_atomic(
             guardian.arm_path(self.data),
             {"cwd": guardian.canonical_path(str(self.root)), "armed_at": guardian.utc_now()},
         )
-        spawned = []
-        result = guardian.handle_hook(
-            payload("Stop", self.transcript, cwd=str(self.root)),
-            env=self.env,
-            spawn_func=lambda command: spawned.append(command),
-        )
-        self.assertIn("manual rollover", result["systemMessage"])
-        self.assertEqual(1, len(spawned))
+        result = guardian.handle_hook(payload("Stop", self.transcript, cwd=str(self.root)), env=self.env)
+        self.assertTrue(result["continue"])
+        confirmation = payload("UserPromptSubmit", self.transcript, cwd=str(self.root))
+        confirmation["prompt"] = "继续交接"
+        confirmed = guardian.handle_hook(confirmation, env=self.env)
+        self.assertTrue(confirmed["continue"])
+        self.assertIn("explicitly confirmed", confirmed["hookSpecificOutput"]["additionalContext"])
 
-    def test_in_progress_session_does_not_recurse(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"] * 2)
-        guardian.update_state(self.data, "session-test", status="summarizing", prompt_count=99)
-        spawned = []
-        result = guardian.handle_hook(
-            payload("Stop", self.transcript), env=self.env, spawn_func=lambda command: spawned.append(command)
-        )
-        self.assertIsNone(result)
-        self.assertFalse(spawned)
 
-    def test_hard_limit_blocks_prompt_and_starts_rollover(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
-        spawned = []
-        result = guardian.handle_hook(
-            payload("UserPromptSubmit", self.transcript),
-            env=self.env,
-            spawn_func=lambda command: spawned.append(command),
-        )
-        self.assertFalse(result["continue"])
-        self.assertIn("hard safety limit", result["systemMessage"])
-        self.assertEqual(1, len(spawned))
-        state = guardian.load_state(self.data, "session-test")
-        self.assertEqual("scheduled", state["status"])
-        self.assertEqual("hard_limit", state["trigger"])
-
-    def test_hard_limit_allows_exactly_one_guardian_summary_turn(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
-        guardian.update_state(
-            self.data,
-            "session-test",
-            status="summarizing",
-            prompt_count=10,
-            warned=True,
-            summary_prompt_pending=True,
-        )
-        summary_payload = payload("UserPromptSubmit", self.transcript)
-        summary_payload["prompt"] = guardian.SUMMARY_PROMPT
-        result = guardian.handle_hook(summary_payload, env=self.env)
-        self.assertIsNone(result)
-        self.assertFalse(guardian.load_state(self.data, "session-test")["summary_prompt_pending"])
-
-        result = guardian.handle_hook(summary_payload, env=self.env)
-        self.assertFalse(result["continue"])
-
-    def test_hard_limit_blocks_user_prompt_during_summary(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
-        guardian.update_state(
-            self.data,
-            "session-test",
-            status="summarizing",
-            prompt_count=10,
-            warned=True,
-            summary_prompt_pending=True,
-        )
-        user_payload = payload("UserPromptSubmit", self.transcript)
-        user_payload["prompt"] = "Continue my work"
-        result = guardian.handle_hook(user_payload, env=self.env)
-        self.assertFalse(result["continue"])
-        self.assertTrue(guardian.load_state(self.data, "session-test")["summary_prompt_pending"])
-
-class SummaryTests(unittest.TestCase):
-    def summary(self):
-        return {
-            "title": "Fix the build",
-            "user_goal": "Make CI pass",
-            "completed": ["Fixed parsing"],
-            "current_state": "One test remains",
-            "decisions": ["Keep Python 3.9"],
-            "files_changed": ["parser.py"],
-            "verification": ["Unit tests: 20/21"],
-            "pending": ["Fix Windows path test"],
-            "next_step": "Run the failing test on Windows",
-            "constraints": ["Do not change the public API"],
-            "warnings": [],
-        }
-
-    def test_parse_and_format_handoff(self):
-        parsed = guardian.parse_summary("```json\n%s\n```" % json.dumps(self.summary()))
-        handoff = guardian.format_handoff(parsed)
-        self.assertIn("Make CI pass", handoff)
-        self.assertIn("- Fixed parsing", handoff)
-        self.assertIn("Do not act on it", handoff)
-
-    def test_safe_title_is_bounded(self):
-        title = guardian.safe_title("x" * 500, None)
-        self.assertLessEqual(len(title), 120)
-        self.assertTrue(title.endswith("continued"))
-
+class ConfigurationTests(unittest.TestCase):
     def test_invalid_config_is_rejected(self):
         config = dict(guardian.DEFAULT_CONFIG)
         config["warning_bytes"] = config["rollover_bytes"]
@@ -217,115 +160,6 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(64 * guardian.MIB, guardian.DEFAULT_CONFIG["warning_bytes"])
         self.assertEqual(96 * guardian.MIB, guardian.DEFAULT_CONFIG["rollover_bytes"])
         self.assertEqual(128 * guardian.MIB, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
-
-
-class FakeClient:
-    instances = []
-    fail_seed = False
-    pinned = False
-    active_goal = False
-    fail_goal_copy = False
-
-    def __init__(self, binary, timeout=900):
-        self.calls = []
-        self.turn_count = 0
-        FakeClient.instances.append(self)
-
-    def request(self, method, params=None, allow_error=False):
-        self.calls.append((method, params, allow_error))
-        if method == "thread/read":
-            return {"thread": {"id": "old", "name": "Original", "isPinned": self.pinned}}
-        if method == "thread/goal/get":
-            if self.active_goal:
-                return {"goal": {"objective": "Finish safely", "status": "active", "tokenBudget": 1000}}
-            return None
-        if method == "thread/goal/set" and self.fail_goal_copy:
-            raise guardian.AppServerError("goal copy failed")
-        if method == "turn/start":
-            self.turn_count += 1
-            return {"turn": {"id": "turn-%d" % self.turn_count}}
-        if method == "thread/start":
-            return {"thread": {"id": "new"}}
-        return {}
-
-    def notify(self, method, params=None):
-        self.calls.append((method, params, False))
-
-    def wait_for_turn(self, thread_id, turn_id):
-        if thread_id == "new":
-            if self.fail_seed:
-                raise guardian.AppServerError("seed failed")
-            return "Handoff loaded."
-        return json.dumps(SummaryTests().summary())
-
-    def close(self):
-        self.calls.append(("close", None, False))
-
-
-class RolloverTransactionTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.data = Path(self.temporary.name)
-        self.job = {
-            "session_id": "old",
-            "cwd": str(self.data),
-            "model": "test-model",
-            "config": dict(guardian.DEFAULT_CONFIG, notifications=False),
-        }
-        FakeClient.instances = []
-        FakeClient.fail_seed = False
-        FakeClient.pinned = False
-        FakeClient.active_goal = False
-        FakeClient.fail_goal_copy = False
-
-    def tearDown(self):
-        self.temporary.cleanup()
-
-    @mock.patch.object(guardian, "find_codex", return_value="codex-test")
-    @mock.patch.object(guardian, "AppServerClient", FakeClient)
-    def test_original_archived_only_after_new_task_is_seeded(self, _find):
-        guardian.run_rollover(self.job, self.data)
-        client = FakeClient.instances[-1]
-        methods = [call[0] for call in client.calls]
-        archive_index = methods.index("thread/archive")
-        second_turn_index = [index for index, value in enumerate(methods) if value == "turn/start"][1]
-        self.assertGreater(archive_index, second_turn_index)
-        archive_params = client.calls[archive_index][1]
-        self.assertEqual("old", archive_params["threadId"])
-        state = guardian.load_state(self.data, "old")
-        self.assertEqual("completed", state["status"])
-        self.assertNotIn("summary", state)
-
-    @mock.patch.object(guardian, "find_codex", return_value="codex-test")
-    @mock.patch.object(guardian, "AppServerClient", FakeClient)
-    def test_failed_seed_keeps_original_and_cleans_new_task(self, _find):
-        FakeClient.fail_seed = True
-        with self.assertRaises(guardian.AppServerError):
-            guardian.run_rollover(self.job, self.data)
-        client = FakeClient.instances[-1]
-        archives = [params for method, params, _ in client.calls if method == "thread/archive"]
-        self.assertEqual([{"threadId": "new"}], archives)
-
-    @mock.patch.object(guardian, "find_codex", return_value="codex-test")
-    @mock.patch.object(guardian, "AppServerClient", FakeClient)
-    def test_pinned_task_is_not_mutated(self, _find):
-        FakeClient.pinned = True
-        with self.assertRaises(guardian.PinnedTaskError):
-            guardian.run_rollover(self.job, self.data)
-        methods = [call[0] for call in FakeClient.instances[-1].calls]
-        self.assertNotIn("turn/start", methods)
-        self.assertNotIn("thread/archive", methods)
-
-    @mock.patch.object(guardian, "find_codex", return_value="codex-test")
-    @mock.patch.object(guardian, "AppServerClient", FakeClient)
-    def test_failed_goal_copy_keeps_original(self, _find):
-        FakeClient.active_goal = True
-        FakeClient.fail_goal_copy = True
-        with self.assertRaises(guardian.AppServerError):
-            guardian.run_rollover(self.job, self.data)
-        client = FakeClient.instances[-1]
-        archives = [params for method, params, _ in client.calls if method == "thread/archive"]
-        self.assertEqual([{"threadId": "new"}], archives)
 
 
 class RepositoryPrivacyTests(unittest.TestCase):

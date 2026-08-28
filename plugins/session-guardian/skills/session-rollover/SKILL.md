@@ -5,24 +5,38 @@ description: Inspect, configure, force, or cancel Session Guardian rollover for 
 
 # Session rollover
 
-Use the Session Guardian script in this plugin for deterministic state changes. Resolve the plugin root as three parent directories above this `SKILL.md`; its entrypoint is `scripts/session_guardian.py`.
+Use the Session Guardian script for deterministic measurement and configuration, and use Codex app task-management tools for the rollover itself. Resolve the plugin root as three parent directories above this `SKILL.md`; its entrypoint is `scripts/session_guardian.py`.
 
 ## Choose the operation
 
-- For inspection, run `python3 <plugin-root>/scripts/session_guardian.py status` and explain the current mode, thresholds, recent rollover state, and whether the Codex executable is available.
-- To force the current task to roll over after this response, run `python3 <plugin-root>/scripts/session_guardian.py arm --cwd "$PWD"`. Tell the user that the current response will finish first and that the original is archived only after the replacement is ready.
+- For inspection, run `python3 <plugin-root>/scripts/session_guardian.py status` and explain the current mode, thresholds, recent rollover state, and whether Codex Desktop task tools were detected.
+- To force rollover now, follow the rollover procedure below in the current turn. Use `arm --cwd "$PWD"` only when the user explicitly wants rollover deferred until the current turn tries to stop.
 - To cancel a forced rollover that has not started, run `python3 <plugin-root>/scripts/session_guardian.py disarm --cwd "$PWD"`.
 - To update settings, run `configure` with only the values requested by the user. Supported options are `--mode auto|warn|off`, `--warning-mib`, `--rollover-mib`, `--hard-limit-mib`, `--min-prompts`, `--archive-original yes|no`, and `--notifications yes|no`.
 - For diagnostics, run `python3 <plugin-root>/scripts/session_guardian.py doctor`.
 
-Do not manipulate transcript contents, plugin state JSON, Codex configuration, or task files directly. Do not manually archive the current task as part of this skill: the worker owns the failure-safe order.
+Do not manipulate transcript contents, plugin state JSON, Codex configuration, or task files directly. Do not start another `codex app-server`: Codex Desktop holds an active writer on the current task, so only the current task's app tools can archive it safely.
+
+## Rollover procedure
+
+Automatic rollover reaches this procedure only after the user explicitly sends `继续交接` or `continue rollover`. Treat that message as a control prompt authorizing the transaction, not as a business request. Any earlier hard-limit business prompt was locally blocked and must not be executed in the current task.
+
+1. Before calling any tool, send a concise commentary update stating that Session Guardian is preparing a compact replacement task. If a business prompt was intercepted, remind the user that it was not executed and must be resent in the replacement.
+2. Build one concise handoff from context already available in this turn. Include the user goal, completed work, current state, decisions, changed files, verification, pending work, exact next step, constraints, and unresolved warnings. Exclude secrets, credentials, hidden reasoning, and redundant discussion. Do not make a second model request merely to summarize.
+3. Use the Codex app project and task tools to create exactly one replacement task. Select the current saved project when it can be identified, and preserve the working tree when repository state matters. Keep the current model/settings unless the user requested an override.
+4. The new task's initial prompt must identify itself as a Session Guardian handoff, contain the compact handoff, instruct the new task to acknowledge the context in one short sentence, and then wait. It must not execute the intercepted request; the user will resend it.
+5. Wait for the replacement task to become ready. If creation, setup, or acknowledgement fails or needs user input, report the concrete problem and leave the current task unarchived.
+6. If the current task is known to be pinned, leave it unarchived and tell the user. If `archive_original` is disabled, also leave it unarchived.
+7. Otherwise, tell the user the replacement is ready and that this task will now be archived, then archive the calling task with the Codex app archival tool. Target the calling task by omitting a task id; never guess an id.
+
+Treat creation plus readiness as the transaction's prepare phase and archival as its commit. Never archive first. Never archive a partially created replacement instead of the original unless cleaning up a failed replacement is clearly safe.
 
 ## Interpret results
 
-The defaults are 64 MiB for warning, 96 MiB for automatic rollover after a completed turn, and 128 MiB for the hard safety limit. Normal automatic rollover also requires six observed prompts. At the hard limit, a new user prompt is blocked while rollover starts; the user must resend that prompt in the replacement task.
+The defaults are 64 MiB for warning, 96 MiB for a rollover-required notice after a completed turn, and 128 MiB for the hard safety limit. The 96 MiB trigger also requires six observed prompts. Both paths require an explicit rollover control prompt. At the hard limit, the business request is blocked with a visible reason and must be resent in the replacement task.
 
 The detector measures transcript byte size plus observed prompt count. It is a proxy for repeated context-upload cost, not a network measurement. Do not add or imply Clash/Mihomo inspection, proxy monitoring, packet capture, or operating-system network-counter sampling. The transcript wire format is unstable, so the monitor intentionally does not parse its contents.
 
-The original task intentionally generates the structured summary through the local Codex App Server. This is the one final full-context request, retained to preserve handoff quality, and the in-progress state allows it through the hard guard.
+Rollover runs inside the current Codex turn so the same model request can both derive the handoff and use the app's task tools. This is the one final full-context request retained to preserve handoff quality. Starting a detached App Server would require another full-context request and cannot archive the desktop-owned original because of the active-writer lock.
 
-Automatic rollover must leave the original task available whenever summary generation, replacement-task creation, goal transfer, or acknowledgement fails. A pinned original is reported but not archived automatically.
+Automatic rollover must leave the original task available whenever handoff generation, replacement-task creation, or acknowledgement fails. A pinned original is reported but not archived automatically.

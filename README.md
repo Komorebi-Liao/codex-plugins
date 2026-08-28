@@ -24,12 +24,19 @@ Restart Codex or start a new task after installation. Review and trust the bundl
 The defaults are:
 
 - warning at 64 MiB;
-- automatic rollover at 96 MiB after a completed turn and at least 6 submitted prompts;
-- a 128 MiB hard safety limit that blocks the next user prompt while rollover starts;
-- archive the original only after the new task is seeded successfully;
+- rollover required at 96 MiB after a completed turn and at least 6 submitted prompts, followed by explicit confirmation;
+- a 128 MiB hard safety limit that locally blocks the prompt, explains why, and requests explicit rollover confirmation;
+- archive the original only after the replacement task is ready;
 - native desktop notifications when supported.
 
 Transcript file size is the sole automatic risk signal. Session Guardian does not inspect Clash/Mihomo connections, proxy traffic, packets, or operating-system network counters.
+
+After an interception, send `继续交接` or `continue rollover`. That explicit control prompt
+authorizes one final full-context Codex response. It announces the rollover first, derives one compact
+handoff from context already loaded, creates and verifies the replacement with the app's task tools,
+and only then archives the calling task. Codex Desktop keeps an active writer on an open task, so this
+current-task transaction avoids both the write-lock failure and a second large summary request. The
+intercepted business request is not executed and a failed rollover leaves the original available.
 
 Invoke `$session-rollover` to inspect, configure, force, or cancel a rollover. See the [Chinese guide](docs/README.zh-CN.md) and [architecture notes](docs/architecture.md) for details.
 
