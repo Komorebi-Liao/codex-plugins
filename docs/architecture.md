@@ -29,10 +29,10 @@ The rollover is an ordered, failure-safe transaction performed by the current Co
 1. The hook records `rollover_required` and locally blocks business prompts with a visible reason.
 2. The user sends the explicit control prompt, authorizing task creation and archival.
 3. The hook records `agent_rollover` and injects mandatory rollover instructions into that response.
-4. Codex first tells the user that rollover is starting and the intercepted request was not executed.
+4. Codex first tells the user that rollover is starting and the intercepted request will resume in the replacement.
 5. Codex derives one compact handoff from context already loaded in that turn. No separate summary request is made.
 6. Codex creates exactly one replacement with the app's task-management tools.
-7. Codex waits until the replacement is ready and has acknowledged the handoff.
+7. Codex waits until the replacement is ready, has acknowledged the handoff, and has accepted the intercepted request when one exists.
 8. Codex leaves a known pinned original or an original with automatic archival disabled available.
 9. Otherwise, the calling task archives itself only after all preceding steps succeed.
 
@@ -46,4 +46,4 @@ For a 96 MiB `Stop` trigger, the hook records that rollover is required and surf
 
 ## Privacy model
 
-Monitoring never reads transcript contents. The only content-processing step uses context already present in the current Codex response. No third-party endpoint, telemetry client, analytics SDK, detached App Server, or separate API credential is present. The generated handoff is sent directly into the replacement task and is not written into Session Guardian's state.
+Monitoring never reads transcript contents. A prompt blocked during rollover enforcement is retained in private plugin state until the original task ends so it can resume in the replacement. No third-party endpoint, telemetry client, analytics SDK, detached App Server, or separate API credential is present. The generated handoff is sent directly into the replacement task and is not written into Session Guardian's state.

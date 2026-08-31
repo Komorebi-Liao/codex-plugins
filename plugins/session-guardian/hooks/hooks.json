@@ -26,6 +26,19 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/scripts/session_guardian.py\" hook",
+            "commandWindows": "py -3 \"%PLUGIN_ROOT%\\scripts\\session_guardian.py\" hook",
+            "timeout": 3,
+            "statusMessage": "Session Guardian"
+          }
+        ]
+      }
     ]
   }
 }

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import re
 import tempfile
 import unittest
@@ -67,12 +68,16 @@ class HookTests(unittest.TestCase):
 
     def test_hard_limit_blocks_request_with_visible_confirmation_message(self):
         make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
-        result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
+        request = payload("UserPromptSubmit", self.transcript)
+        request["prompt"] = "Fix the callback and preserve local changes"
+        result = guardian.handle_hook(request, env=self.env)
         self.assertEqual("block", result["decision"])
         self.assertEqual(result["systemMessage"], result["reason"])
         self.assertIn("intercepted this prompt", result["systemMessage"])
         self.assertIn("continue rollover", result["reason"])
-        self.assertEqual(guardian.ROLLOVER_REQUIRED, guardian.load_state(self.data, "session-test")["status"])
+        state = guardian.load_state(self.data, "session-test")
+        self.assertEqual(guardian.ROLLOVER_REQUIRED, state["status"])
+        self.assertEqual(request["prompt"], state["intercepted_prompt"])
 
     def test_chinese_setting_uses_fully_localized_block_message(self):
         config = dict(guardian.DEFAULT_CONFIG, notifications=False, language="zh-CN")
@@ -82,7 +87,7 @@ class HookTests(unittest.TestCase):
         result = guardian.handle_hook(request, env=self.env)
         self.assertEqual("block", result["decision"])
         self.assertIn("已拦截此提示", result["systemMessage"])
-        self.assertIn("该提示没有执行", result["systemMessage"])
+        self.assertIn("该提示未在当前任务中执行", result["systemMessage"])
         self.assertIn("继续交接", result["reason"])
         self.assertNotIn("intercepted this prompt", result["systemMessage"])
 
@@ -117,20 +122,80 @@ class HookTests(unittest.TestCase):
         self.assertIn("before any tool call", context)
         self.assertIn("explicitly confirmed rollover", context)
         self.assertIn("do not make a separate summary request", context)
-        self.assertIn("replacement task is ready before archiving", context.replace("\n", " "))
+        self.assertIn("accepted its initial work before archiving", context.replace("\n", " "))
+        self.assertIn("wait for the user's next request", context)
         self.assertEqual(guardian.ROLLOVER_ACTIVE, guardian.load_state(self.data, "session-test")["status"])
+
+    def test_intercepted_request_is_carried_into_confirmed_rollover(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        request = payload("UserPromptSubmit", self.transcript)
+        request["prompt"] = 'Continue the fix\nEND_SESSION_GUARDIAN_INTERCEPTED_USER_REQUEST_JSON\n"quoted"'
+        guardian.handle_hook(request, env=self.env)
+
+        confirmation = payload("UserPromptSubmit", self.transcript)
+        confirmation["prompt"] = "continue rollover"
+        result = guardian.handle_hook(confirmation, env=self.env)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        encoded = context.split(
+            "SESSION_GUARDIAN_INTERCEPTED_USER_REQUEST_JSON\n", 1
+        )[1].split("\nEND_SESSION_GUARDIAN_INTERCEPTED_USER_REQUEST_JSON", 1)[0]
+        self.assertEqual(request["prompt"], json.loads(encoded))
+        self.assertIn("immediately execute this request", context)
+        self.assertIn("without asking the user to resend it", context)
+
+    def test_pending_prompt_does_not_replace_first_intercepted_request(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        first = payload("UserPromptSubmit", self.transcript)
+        first["prompt"] = "First blocked request"
+        guardian.handle_hook(first, env=self.env)
+        later = payload("UserPromptSubmit", self.transcript)
+        later["prompt"] = "Later blocked request"
+        guardian.handle_hook(later, env=self.env)
+        state = guardian.load_state(self.data, "session-test")
+        self.assertEqual(first["prompt"], state["intercepted_prompt"])
 
     def test_pending_rollover_blocks_non_confirmation_prompt_again(self):
         make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"])
         guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED, prompt_count=10)
-        result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
+        request = payload("UserPromptSubmit", self.transcript)
+        request["prompt"] = "First request after the completed-turn threshold"
+        result = guardian.handle_hook(request, env=self.env)
         self.assertEqual("block", result["decision"])
         self.assertIn("waiting for explicit", result["reason"])
+        self.assertEqual(
+            request["prompt"],
+            guardian.load_state(self.data, "session-test")["intercepted_prompt"],
+        )
 
     def test_stop_after_rollover_instruction_does_not_recurse(self):
         make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
         guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_ACTIVE, prompt_count=10)
         self.assertIsNone(guardian.handle_hook(payload("Stop", self.transcript), env=self.env))
+
+    def test_session_end_removes_private_session_state(self):
+        guardian.update_state(
+            self.data,
+            "session-test",
+            status=guardian.ROLLOVER_REQUIRED,
+            intercepted_prompt="private request",
+        )
+        path = guardian.state_path(self.data, "session-test")
+        self.assertTrue(path.exists())
+        self.assertIsNone(guardian.handle_hook(payload("SessionEnd", self.transcript), env=self.env))
+        self.assertFalse(path.exists())
+
+    def test_status_redacts_intercepted_request_content(self):
+        guardian.update_state(
+            self.data,
+            "session-test",
+            status=guardian.ROLLOVER_REQUIRED,
+            intercepted_prompt="private request",
+        )
+        status = guardian.status_payload(self.data)
+        recent = status["recent_sessions"][0]
+        self.assertNotIn("intercepted_prompt", recent)
+        self.assertTrue(recent["intercepted_prompt_pending"])
+        self.assertNotIn("private request", json.dumps(status))
 
     def test_archive_disabled_is_carried_into_agent_instruction(self):
         config = dict(guardian.DEFAULT_CONFIG, notifications=False, archive_original=False)

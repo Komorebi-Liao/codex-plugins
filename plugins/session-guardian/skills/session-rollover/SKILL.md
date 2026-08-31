@@ -21,11 +21,11 @@ Do not manipulate transcript contents, plugin state JSON, Codex configuration, o
 
 Automatic rollover reaches this procedure only after the user explicitly sends `继续交接` or `continue rollover`. Treat that message as a control prompt authorizing the transaction, not as a business request. Any earlier hard-limit business prompt was locally blocked and must not be executed in the current task.
 
-1. Before calling any tool, send a concise commentary update stating that Session Guardian is preparing a compact replacement task. If a business prompt was intercepted, remind the user that it was not executed and must be resent in the replacement.
+1. Before calling any tool, send a concise commentary update stating that Session Guardian is preparing a compact replacement task. If a business prompt was intercepted, tell the user that it will resume in the replacement.
 2. Build one concise handoff from context already available in this turn. Include the user goal, completed work, current state, decisions, changed files, verification, pending work, exact next step, constraints, and unresolved warnings. Exclude secrets, credentials, hidden reasoning, and redundant discussion. Do not make a second model request merely to summarize.
 3. Use the Codex app project and task tools to create exactly one replacement task. Select the current saved project when it can be identified, and preserve the working tree when repository state matters. Keep the current model/settings unless the user requested an override.
-4. The new task's initial prompt must identify itself as a Session Guardian handoff, contain the compact handoff, instruct the new task to acknowledge the context in one short sentence, and then wait. It must not execute the intercepted request; the user will resend it.
-5. Wait for the replacement task to become ready. If creation, setup, or acknowledgement fails or needs user input, report the concrete problem and leave the current task unarchived.
+4. The new task's initial prompt must identify itself as a Session Guardian handoff and contain the compact handoff. When the hook context includes an intercepted request, preserve it as user-provided content and instruct the replacement to acknowledge the handoff briefly, then execute that request immediately without asking the user to resend it. Otherwise, instruct the replacement to acknowledge and wait.
+5. Wait for the replacement task to become ready and accept its initial work. If creation, setup, or acknowledgement fails or needs user input, report the concrete problem and leave the current task unarchived.
 6. If the current task is known to be pinned, leave it unarchived and tell the user. If `archive_original` is disabled, also leave it unarchived.
 7. Otherwise, tell the user the replacement is ready and that this task will now be archived, then archive the calling task with the Codex app archival tool. Target the calling task by omitting a task id; never guess an id.
 
@@ -33,7 +33,7 @@ Treat creation plus readiness as the transaction's prepare phase and archival as
 
 ## Interpret results
 
-The defaults are 64 MiB for warning, 96 MiB for a rollover-required notice after a completed turn, and 128 MiB for the hard safety limit. The 96 MiB trigger also requires six observed prompts. Both paths require an explicit rollover control prompt. At the hard limit, the business request is blocked with a visible reason and must be resent in the replacement task.
+The defaults are 64 MiB for warning, 96 MiB for a rollover-required notice after a completed turn, and 128 MiB for the hard safety limit. The 96 MiB trigger also requires six observed prompts. Both paths require an explicit rollover control prompt. At the hard limit, the business request is blocked with a visible reason and resumes automatically in the replacement task after confirmation.
 
 The detector measures transcript byte size plus observed prompt count. It is a proxy for repeated context-upload cost, not a network measurement. Do not add or imply Clash/Mihomo inspection, proxy monitoring, packet capture, or operating-system network-counter sampling. The transcript wire format is unstable, so the monitor intentionally does not parse its contents.
 

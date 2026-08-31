@@ -36,7 +36,7 @@ authorizes one final full-context Codex response. It announces the rollover firs
 handoff from context already loaded, creates and verifies the replacement with the app's task tools,
 and only then archives the calling task. Codex Desktop keeps an active writer on an open task, so this
 current-task transaction avoids both the write-lock failure and a second large summary request. The
-intercepted business request is not executed and a failed rollover leaves the original available.
+intercepted business request resumes in the replacement and a failed rollover leaves the original available.
 
 Invoke `$session-rollover` to inspect, configure, force, or cancel a rollover. See the [Chinese guide](docs/README.zh-CN.md) and [architecture notes](docs/architecture.md) for details.
 
