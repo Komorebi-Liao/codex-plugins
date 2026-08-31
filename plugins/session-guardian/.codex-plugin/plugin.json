@@ -1,6 +1,6 @@
 {
   "name": "session-guardian",
-  "version": "1.4.0+codex.20260831120026",
+  "version": "1.4.1",
   "description": "Detect oversized Codex tasks and safely continue them in a compact replacement task.",
   "author": {
     "name": "Komorebi-Liao",
