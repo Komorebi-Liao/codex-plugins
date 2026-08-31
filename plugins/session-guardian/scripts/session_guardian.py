@@ -48,6 +48,17 @@ context already available in this turn; do not make a separate summary request. 
 replacement task is ready and has accepted its initial work before archiving this current task. If
 any required task tool is missing or fails, leave this task unarchived and explain the concrete error
 to the user.
+
+Before creating the replacement, call the Codex app project-listing tool and validate the selected
+saved project's Git state with read-only shell commands. Prefer a saved project whose path exactly
+matches the Git repository that contains the active files or changes. For any worktree candidate,
+run `git -C <project-path> rev-parse --verify HEAD^{commit}` and verify any explicit starting ref at
+that same path. Never invent or assume `main` or `master`, and never pass an unverified branch name.
+Do not add or register a new Codex project, initialize or repair Git, move files, or change branches
+as part of rollover. If the current saved project has no commit, points at the wrong Git root, or has
+no verified starting ref, reuse that same saved project with environment type `local` and include the
+actual code subdirectory in the replacement prompt. If no safe saved project can be selected, stop,
+leave this task unarchived, and report the mismatch.
 """
 
 MESSAGES = {

@@ -124,6 +124,10 @@ class HookTests(unittest.TestCase):
         self.assertIn("do not make a separate summary request", context)
         self.assertIn("accepted its initial work before archiving", context.replace("\n", " "))
         self.assertIn("wait for the user's next request", context)
+        self.assertIn("rev-parse --verify HEAD^{commit}", context)
+        self.assertIn("Never invent or assume `main` or `master`", context)
+        self.assertIn("Do not add or register a new Codex project", context)
+        self.assertIn("environment type `local`", context)
         self.assertEqual(guardian.ROLLOVER_ACTIVE, guardian.load_state(self.data, "session-test")["status"])
 
     def test_intercepted_request_is_carried_into_confirmed_rollover(self):
