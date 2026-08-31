@@ -25,7 +25,8 @@ By default, once a task reaches 64 MiB, the next submitted prompt is blocked loc
 starts work. Session Guardian preserves that business request and asks the user to reply `yes` or
 `是`. The confirmation authorizes one final full-context response that creates a compact replacement
 in the same saved project, resumes the preserved request there, and archives the original only after
-the replacement is ready. Native desktop notifications are used when supported.
+the replacement is ready. Codex then navigates to the ready replacement task so the user lands in the
+resumed session. Native desktop notifications are used when supported.
 
 Transcript file size is the sole automatic risk signal. Session Guardian does not inspect Clash/Mihomo connections, proxy traffic, packets, or operating-system network counters.
 
@@ -34,7 +35,8 @@ authorizes one final full-context Codex response. It announces the rollover firs
 handoff from context already loaded, creates and verifies the replacement with the app's task tools,
 and only then archives the calling task. Codex Desktop keeps an active writer on an open task, so this
 current-task transaction avoids both the write-lock failure and a second large summary request. The
-intercepted business request resumes in the replacement and a failed rollover leaves the original available.
+intercepted business request resumes in the replacement and the UI navigates to that task. A failed
+rollover leaves the original available.
 
 Invoke `$session-rollover` to inspect, configure, force, or cancel a rollover. See the [Chinese guide](docs/README.zh-CN.md) and [architecture notes](docs/architecture.md) for details.
 

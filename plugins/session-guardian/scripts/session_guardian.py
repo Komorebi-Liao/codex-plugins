@@ -50,6 +50,9 @@ register a project, initialize or repair Git, move files, change branches, or in
 `master` during rollover. Wait until the replacement task is ready and has accepted its initial work
 before archiving this current task. If the current saved project cannot be identified or any required
 task tool is missing or fails, leave this task unarchived and explain the concrete error to the user.
+After the replacement is ready and has accepted its initial work, navigate to that replacement with
+the Codex app's `navigate_to_codex_page` task tool, using the replacement's actual `threadId`. Do not
+navigate to a generic new-conversation page, and do not pass a setup-only `clientThreadId`.
 """
 
 MESSAGES = {

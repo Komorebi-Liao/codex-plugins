@@ -101,6 +101,9 @@ class HookTests(unittest.TestCase):
         self.assertIn("same saved project using the local environment", context.replace("\n", " "))
         self.assertIn("Do not add or register a project", context.replace("\n", " "))
         self.assertIn("invent `main` or `master`", context.replace("\n", " "))
+        self.assertIn("navigate to that replacement", context.replace("\n", " "))
+        self.assertIn("actual `threadId`", context.replace("\n", " "))
+        self.assertIn("Do not navigate to a generic new-conversation page", context.replace("\n", " "))
         self.assertEqual(guardian.ROLLOVER_ACTIVE, guardian.load_state(self.data, "session-test")["status"])
 
     def test_chinese_yes_confirmation_is_accepted_only_while_pending(self):

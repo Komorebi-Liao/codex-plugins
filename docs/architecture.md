@@ -32,8 +32,9 @@ The rollover is an ordered, failure-safe transaction performed by the current Co
 5. Codex derives one compact handoff from context already loaded in that turn. No separate summary request is made.
 6. Codex creates exactly one replacement in the same saved project with the Local environment using the app's task-management tools.
 7. Codex waits until the replacement is ready, has acknowledged the handoff, and has accepted the intercepted request when one exists.
-8. Codex leaves a known pinned original or an original with automatic archival disabled available.
-9. Otherwise, the calling task archives itself only after all preceding steps succeed.
+8. Codex navigates to the ready replacement task with `navigate_to_codex_page` using its actual `threadId`, so the user lands in the resumed task rather than the generic new-conversation page.
+9. Codex leaves a known pinned original or an original with automatic archival disabled available.
+10. Otherwise, the calling task archives itself only after all preceding steps succeed.
 
 If task creation, setup, acknowledgement, or archival tooling fails, Codex reports the concrete error and the original remains available.
 
