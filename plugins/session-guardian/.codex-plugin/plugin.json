@@ -1,6 +1,6 @@
 {
   "name": "session-guardian",
-  "version": "1.4.0+codex.20260831033633",
+  "version": "1.4.0+codex.20260831120026",
   "description": "Detect oversized Codex tasks and safely continue them in a compact replacement task.",
   "author": {
     "name": "Komorebi-Liao",
@@ -9,15 +9,24 @@
   "homepage": "https://github.com/Komorebi-Liao/codex-plugins",
   "repository": "https://github.com/Komorebi-Liao/codex-plugins",
   "license": "Apache-2.0",
-  "keywords": ["codex", "session", "context", "rollover", "automation"],
+  "keywords": [
+    "codex",
+    "session",
+    "context",
+    "rollover",
+    "automation"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Session Guardian",
     "shortDescription": "Roll oversized tasks into compact handoffs.",
-    "longDescription": "Monitors Codex task size locally, warns before requests become expensive, and safely creates a summarized replacement task before archiving the original.",
+    "longDescription": "Monitors Codex task size locally, blocks oversized prompts before execution, and safely asks Codex to continue in a summarized replacement before archiving the original.",
     "developerName": "Komorebi-Liao",
     "category": "Productivity",
-    "capabilities": ["Lifecycle hooks", "Local automation"],
+    "capabilities": [
+      "Lifecycle hooks",
+      "Local automation"
+    ],
     "websiteURL": "https://github.com/Komorebi-Liao/codex-plugins",
     "privacyPolicyURL": "https://github.com/Komorebi-Liao/codex-plugins/blob/main/PRIVACY.md",
     "defaultPrompt": [

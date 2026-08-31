@@ -15,10 +15,9 @@ No MCP server is needed because all required operations are local Codex operatio
 Codex supplies `session_id`, `transcript_path`, `cwd`, event name, and model to command hooks. The transcript format is not a stable public interface, so Session Guardian deliberately does not parse it. It uses only:
 
 - transcript file size in bytes;
-- the number of `UserPromptSubmit` events observed for the task;
 - a one-shot manual rollover flag, when explicitly requested.
 
-The default size policy is 64 MiB for warning, 96 MiB for rollover-required notification, and 128 MiB for the hard safety limit. The 96 MiB path also requires six observed prompts so that one large attachment does not immediately archive a new task. At 128 MiB, the submitted business request is locally blocked regardless of prompt count. The hook asks for the exact control prompt `继续交接` or `continue rollover`; only that explicit confirmation starts the final full-context rollover response.
+The default size policy is one 64 MiB threshold. After the task reaches it, the synchronous `UserPromptSubmit` hook blocks the next submitted business request before Codex starts work. The hook asks for `是` or `yes`; the legacy prompts `继续交接` and `continue rollover` remain accepted. Only an explicit confirmation while rollover is pending starts the final full-context rollover response.
 
 Transcript byte size is the sole automatic risk signal. Session Guardian does not inspect Clash/Mihomo connections, proxy traffic, packets, or operating-system network counters. It measures a strong proxy for repeated context-upload cost rather than network traffic itself.
 
@@ -31,7 +30,7 @@ The rollover is an ordered, failure-safe transaction performed by the current Co
 3. The hook records `agent_rollover` and injects mandatory rollover instructions into that response.
 4. Codex first tells the user that rollover is starting and the intercepted request will resume in the replacement.
 5. Codex derives one compact handoff from context already loaded in that turn. No separate summary request is made.
-6. Codex creates exactly one replacement with the app's task-management tools.
+6. Codex creates exactly one replacement in the same saved project with the Local environment using the app's task-management tools.
 7. Codex waits until the replacement is ready, has acknowledged the handoff, and has accepted the intercepted request when one exists.
 8. Codex leaves a known pinned original or an original with automatic archival disabled available.
 9. Otherwise, the calling task archives itself only after all preceding steps succeed.
@@ -42,7 +41,7 @@ This ownership model is intentional. Codex Desktop holds an active writer on an 
 
 ## Recursion and concurrency controls
 
-For a 96 MiB `Stop` trigger, the hook records that rollover is required and surfaces the confirmation instruction without starting another model response. For a 128 MiB prompt trigger, the hook uses the event-specific `block` decision and visible `reason`, so the business prompt never reaches the model. While rollover is pending, every non-confirmation prompt is blocked. The confirmation response records `agent_rollover`; its later `Stop` event is ignored to prevent recursion. A later confirmation retries the same protected path if the previous rollover did not archive the task.
+At 64 MiB, the `UserPromptSubmit` hook uses the event-specific `block` decision and visible `reason`, so the business prompt never reaches the model. While rollover is pending, every non-confirmation prompt is blocked and the first intercepted request remains preserved. The confirmation response records `agent_rollover`; its later `Stop` event is ignored to prevent recursion. A later confirmation retries the same protected path if the previous rollover did not archive the task. The `Stop` hook remains only for explicitly armed manual rollover.
 
 ## Privacy model
 

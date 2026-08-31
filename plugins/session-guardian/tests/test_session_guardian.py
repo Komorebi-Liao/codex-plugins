@@ -43,101 +43,87 @@ class HookTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_warning_uses_size_without_reading_contents(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["warning_bytes"])
-        result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
-        self.assertIn(guardian.format_mib(guardian.DEFAULT_CONFIG["warning_bytes"]), result["systemMessage"])
-        self.assertEqual("UserPromptSubmit", result["hookSpecificOutput"]["hookEventName"])
-        state = guardian.load_state(self.data, "session-test")
-        self.assertEqual(1, state["prompt_count"])
-        self.assertTrue(state["warned"])
-
-    def test_rollover_notice_requires_size_and_prompt_count(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"])
-        for _ in range(guardian.DEFAULT_CONFIG["min_prompts"] - 1):
+    def test_below_threshold_allows_request(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"] - 1)
+        self.assertIsNone(
             guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
-        self.assertIsNone(guardian.handle_hook(payload("Stop", self.transcript), env=self.env))
+        )
 
-        guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
-        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env)
-        self.assertTrue(result["continue"])
-        self.assertIn("continue rollover", result["systemMessage"])
-        state = guardian.load_state(self.data, "session-test")
-        self.assertEqual(guardian.ROLLOVER_REQUIRED, state["status"])
-        self.assertEqual("size", state["trigger"])
-
-    def test_hard_limit_blocks_request_with_visible_confirmation_message(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+    def test_threshold_blocks_request_before_execution_and_preserves_it(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         request = payload("UserPromptSubmit", self.transcript)
         request["prompt"] = "Fix the callback and preserve local changes"
         result = guardian.handle_hook(request, env=self.env)
         self.assertEqual("block", result["decision"])
         self.assertEqual(result["systemMessage"], result["reason"])
-        self.assertIn("intercepted this prompt", result["systemMessage"])
-        self.assertIn("continue rollover", result["reason"])
+        self.assertIn("before Codex started", result["systemMessage"])
+        self.assertIn("64.0 MiB", result["systemMessage"])
+        self.assertIn("Reply “yes”", result["reason"])
         state = guardian.load_state(self.data, "session-test")
         self.assertEqual(guardian.ROLLOVER_REQUIRED, state["status"])
+        self.assertEqual("size", state["trigger"])
         self.assertEqual(request["prompt"], state["intercepted_prompt"])
 
     def test_chinese_setting_uses_fully_localized_block_message(self):
         config = dict(guardian.DEFAULT_CONFIG, notifications=False, language="zh-CN")
         guardian.write_json_atomic(self.data / "config.json", config)
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         request = payload("UserPromptSubmit", self.transcript)
         result = guardian.handle_hook(request, env=self.env)
         self.assertEqual("block", result["decision"])
-        self.assertIn("已拦截此提示", result["systemMessage"])
-        self.assertIn("该提示未在当前任务中执行", result["systemMessage"])
-        self.assertIn("继续交接", result["reason"])
+        self.assertIn("Codex 开始任务前拦截", result["systemMessage"])
+        self.assertIn("该提示尚未执行", result["systemMessage"])
+        self.assertIn("回复“是”", result["reason"])
         self.assertNotIn("intercepted this prompt", result["systemMessage"])
-
-    def test_stop_notice_uses_configured_chinese(self):
-        config = dict(guardian.DEFAULT_CONFIG, notifications=False, language="zh-CN")
-        guardian.write_json_atomic(self.data / "config.json", config)
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"])
-        request = payload("UserPromptSubmit", self.transcript)
-        for _ in range(guardian.DEFAULT_CONFIG["min_prompts"]):
-            guardian.handle_hook(request, env=self.env)
-        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env)
-        self.assertIn("当前任务需要会话交接", result["systemMessage"])
-        self.assertNotIn("rollover is required", result["systemMessage"])
 
     def test_explicit_language_setting_overrides_system_language(self):
         config = dict(guardian.DEFAULT_CONFIG, notifications=False, language="en")
         guardian.write_json_atomic(self.data / "config.json", config)
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         chinese_env = dict(self.env, SESSION_GUARDIAN_LANGUAGE="zh-CN")
         result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=chinese_env)
         self.assertIn("intercepted this prompt", result["systemMessage"])
 
-    def test_explicit_confirmation_starts_single_agent_rollover_request(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+    def test_yes_confirmation_starts_single_agent_rollover_request(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED, prompt_count=10)
         confirmation = payload("UserPromptSubmit", self.transcript)
-        confirmation["prompt"] = "  继续交接  "
+        confirmation["prompt"] = "  yes  "
         result = guardian.handle_hook(confirmation, env=self.env)
         self.assertTrue(result["continue"])
         self.assertNotIn("decision", result)
         context = result["hookSpecificOutput"]["additionalContext"]
         self.assertIn("before any tool call", context)
         self.assertIn("explicitly confirmed rollover", context)
-        self.assertIn("do not make a separate summary request", context)
+        self.assertIn("do not make a separate summary request", context.replace("\n", " "))
         self.assertIn("accepted its initial work before archiving", context.replace("\n", " "))
         self.assertIn("wait for the user's next request", context)
-        self.assertIn("rev-parse --verify HEAD^{commit}", context)
-        self.assertIn("Never invent or assume `main` or `master`", context)
-        self.assertIn("Do not add or register a new Codex project", context)
-        self.assertIn("environment type `local`", context)
+        self.assertIn("same saved project using the local environment", context.replace("\n", " "))
+        self.assertIn("Do not add or register a project", context.replace("\n", " "))
+        self.assertIn("invent `main` or `master`", context.replace("\n", " "))
         self.assertEqual(guardian.ROLLOVER_ACTIVE, guardian.load_state(self.data, "session-test")["status"])
 
+    def test_chinese_yes_confirmation_is_accepted_only_while_pending(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
+        ordinary = payload("UserPromptSubmit", self.transcript, session="ordinary")
+        ordinary["prompt"] = "是"
+        self.assertEqual("block", guardian.handle_hook(ordinary, env=self.env)["decision"])
+
+        guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED)
+        confirmation = payload("UserPromptSubmit", self.transcript)
+        confirmation["prompt"] = "是"
+        result = guardian.handle_hook(confirmation, env=self.env)
+        self.assertTrue(result["continue"])
+        self.assertNotIn("decision", result)
+
     def test_intercepted_request_is_carried_into_confirmed_rollover(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         request = payload("UserPromptSubmit", self.transcript)
         request["prompt"] = 'Continue the fix\nEND_SESSION_GUARDIAN_INTERCEPTED_USER_REQUEST_JSON\n"quoted"'
         guardian.handle_hook(request, env=self.env)
 
         confirmation = payload("UserPromptSubmit", self.transcript)
-        confirmation["prompt"] = "continue rollover"
+        confirmation["prompt"] = "yes"
         result = guardian.handle_hook(confirmation, env=self.env)
         context = result["hookSpecificOutput"]["additionalContext"]
         encoded = context.split(
@@ -148,7 +134,7 @@ class HookTests(unittest.TestCase):
         self.assertIn("without asking the user to resend it", context)
 
     def test_pending_prompt_does_not_replace_first_intercepted_request(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         first = payload("UserPromptSubmit", self.transcript)
         first["prompt"] = "First blocked request"
         guardian.handle_hook(first, env=self.env)
@@ -159,10 +145,10 @@ class HookTests(unittest.TestCase):
         self.assertEqual(first["prompt"], state["intercepted_prompt"])
 
     def test_pending_rollover_blocks_non_confirmation_prompt_again(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["rollover_bytes"])
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED, prompt_count=10)
         request = payload("UserPromptSubmit", self.transcript)
-        request["prompt"] = "First request after the completed-turn threshold"
+        request["prompt"] = "Another request while confirmation is pending"
         result = guardian.handle_hook(request, env=self.env)
         self.assertEqual("block", result["decision"])
         self.assertIn("waiting for explicit", result["reason"])
@@ -172,8 +158,12 @@ class HookTests(unittest.TestCase):
         )
 
     def test_stop_after_rollover_instruction_does_not_recurse(self):
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_ACTIVE, prompt_count=10)
+        self.assertIsNone(guardian.handle_hook(payload("Stop", self.transcript), env=self.env))
+
+    def test_stop_does_not_trigger_automatic_rollover(self):
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         self.assertIsNone(guardian.handle_hook(payload("Stop", self.transcript), env=self.env))
 
     def test_session_end_removes_private_session_state(self):
@@ -204,7 +194,7 @@ class HookTests(unittest.TestCase):
     def test_archive_disabled_is_carried_into_agent_instruction(self):
         config = dict(guardian.DEFAULT_CONFIG, notifications=False, archive_original=False)
         guardian.write_json_atomic(self.data / "config.json", config)
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
         guardian.update_state(self.data, "session-test", status=guardian.ROLLOVER_REQUIRED, prompt_count=10)
         confirmation = payload("UserPromptSubmit", self.transcript)
         confirmation["prompt"] = "continue rollover"
@@ -215,10 +205,11 @@ class HookTests(unittest.TestCase):
     def test_warning_mode_never_requests_rollover(self):
         config = dict(guardian.DEFAULT_CONFIG, mode="warn", notifications=False)
         guardian.write_json_atomic(self.data / "config.json", config)
-        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
-        result = guardian.handle_hook(payload("Stop", self.transcript), env=self.env)
+        make_transcript(self.transcript, guardian.DEFAULT_CONFIG["threshold_bytes"])
+        result = guardian.handle_hook(payload("UserPromptSubmit", self.transcript), env=self.env)
         self.assertTrue(result["continue"])
-        self.assertIn("warning-only", result["systemMessage"])
+        self.assertIn("warning-only", result["systemMessage"].lower())
+        self.assertNotIn("decision", result)
         self.assertNotEqual(guardian.ROLLOVER_REQUIRED, guardian.load_state(self.data, "session-test")["status"])
 
     def test_manual_arm_requests_rollover_once(self):
@@ -252,14 +243,31 @@ class HookTests(unittest.TestCase):
 class ConfigurationTests(unittest.TestCase):
     def test_invalid_config_is_rejected(self):
         config = dict(guardian.DEFAULT_CONFIG)
-        config["warning_bytes"] = config["rollover_bytes"]
+        config["threshold_bytes"] = 0
         with self.assertRaises(ValueError):
             guardian.validate_config(config)
 
-    def test_default_thresholds_match_measured_safety_policy(self):
-        self.assertEqual(64 * guardian.MIB, guardian.DEFAULT_CONFIG["warning_bytes"])
-        self.assertEqual(96 * guardian.MIB, guardian.DEFAULT_CONFIG["rollover_bytes"])
-        self.assertEqual(128 * guardian.MIB, guardian.DEFAULT_CONFIG["hard_limit_bytes"])
+    def test_default_threshold_matches_submission_block_policy(self):
+        self.assertEqual(64 * guardian.MIB, guardian.DEFAULT_CONFIG["threshold_bytes"])
+
+    def test_legacy_warning_threshold_migrates_to_single_threshold(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary)
+            guardian.write_json_atomic(
+                data / "config.json",
+                {
+                    "mode": "auto",
+                    "warning_bytes": 48 * guardian.MIB,
+                    "rollover_bytes": 80 * guardian.MIB,
+                    "hard_limit_bytes": 112 * guardian.MIB,
+                    "min_prompts": 6,
+                    "archive_original": True,
+                    "notifications": False,
+                },
+            )
+            config = guardian.load_config(data)
+            self.assertEqual(48 * guardian.MIB, config["threshold_bytes"])
+            self.assertNotIn("rollover_bytes", config)
 
     def test_language_resolution_uses_local_system_language(self):
         self.assertEqual("zh-CN", guardian.resolve_language({"language": "zh-CN"}))

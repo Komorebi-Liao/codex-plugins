@@ -7,9 +7,9 @@ Open-source Codex plugins maintained in this repository.
 Session Guardian watches the size of a Codex task locally. When a task becomes large enough to make every subsequent request expensive, it creates a compact handoff in a new task and archives the old task.
 
 - Local lifecycle monitoring; no third-party analytics or telemetry.
-- Transcript-size protection at 64 MiB, 96 MiB, and 128 MiB.
+- A single 64 MiB submission-time protection threshold.
 - Failure-safe: the original task is archived only after the handoff task is ready.
-- Manual rollover, warning-only mode, configurable thresholds, and desktop notifications.
+- Manual rollover, warning-only mode, a configurable threshold, and desktop notifications.
 - No API key and no MCP server required.
 
 ### Install from GitHub
@@ -21,17 +21,15 @@ codex plugin add session-guardian@komorebi-codex-plugins
 
 Restart Codex or start a new task after installation. Review and trust the bundled hooks when Codex prompts you, or open `/hooks` in the CLI.
 
-The defaults are:
-
-- warning at 64 MiB;
-- rollover required at 96 MiB after a completed turn and at least 6 submitted prompts, followed by explicit confirmation;
-- a 128 MiB hard safety limit that locally blocks the prompt, explains why, and requests explicit rollover confirmation;
-- archive the original only after the replacement task is ready;
-- native desktop notifications when supported.
+By default, once a task reaches 64 MiB, the next submitted prompt is blocked locally before Codex
+starts work. Session Guardian preserves that business request and asks the user to reply `yes` or
+`是`. The confirmation authorizes one final full-context response that creates a compact replacement
+in the same saved project, resumes the preserved request there, and archives the original only after
+the replacement is ready. Native desktop notifications are used when supported.
 
 Transcript file size is the sole automatic risk signal. Session Guardian does not inspect Clash/Mihomo connections, proxy traffic, packets, or operating-system network counters.
 
-After an interception, send `继续交接` or `continue rollover`. That explicit control prompt
+After an interception, reply `是` or `yes` (`继续交接` and `continue rollover` remain accepted). That explicit control prompt
 authorizes one final full-context Codex response. It announces the rollover first, derives one compact
 handoff from context already loaded, creates and verifies the replacement with the app's task tools,
 and only then archives the calling task. Codex Desktop keeps an active writer on an open task, so this
